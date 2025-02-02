@@ -6,6 +6,7 @@ import numpy as np
 import random
 from collections import deque
 import math
+from torch.utils.tensorboard import SummaryWriter
 
 # ---------------------------
 # Helper Function for Direction Mapping
@@ -20,12 +21,31 @@ def get_new_direction(current, action_index):
     }
     return mapping[current][action_index]
 
+def test_direction_mapping():
+    assert get_new_direction("UP", 0) == "RIGHT"
+    assert get_new_direction("UP", 1) == "UP"
+    assert get_new_direction("UP", 2) == "LEFT"
+    assert get_new_direction("RIGHT", 0) == "DOWN"
+    assert get_new_direction("RIGHT", 1) == "RIGHT"
+    assert get_new_direction("RIGHT", 2) == "UP"
+    assert get_new_direction("DOWN", 0) == "LEFT"
+    assert get_new_direction("DOWN", 1) == "DOWN"
+    assert get_new_direction("DOWN", 2) == "RIGHT"
+    assert get_new_direction("LEFT", 0) == "UP"
+    assert get_new_direction("LEFT", 1) == "LEFT"
+    assert get_new_direction("LEFT", 2) == "DOWN"
+
+test_direction_mapping()
+
 # ---------------------------
 # Neural Network for Snake AI
 # ---------------------------
 class SnakeAI(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(SnakeAI, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
         self.linear1 = nn.Linear(input_size, hidden_size)
         self.linear2 = nn.Linear(hidden_size, hidden_size)
         self.linear3 = nn.Linear(hidden_size, output_size)
@@ -130,34 +150,43 @@ class SnakeGameAI:
         reward = 0
         game_over = False
         
-        # Convert one-hot action into an index (0 = right turn, 1 = straight, 2 = left turn)
+        # Compute previous distance from head to food
+        prev_food_dist = math.dist(self.snake[0], self.food)
+        
+        # Convert one-hot action into an index (0 = turn right, 1 = straight, 2 = turn left)
         action_index = np.argmax(action)
         # Update the snake's direction using the helper function
         self.direction = get_new_direction(self.direction, action_index)
         
-        # Move snake: compute new head position based on updated direction
-        head = self.snake[0].copy()
+        new_head = self.snake[0].copy()
         if self.direction == "RIGHT":
-            head[0] += self.block_size
+            new_head[0] += self.block_size
         elif self.direction == "LEFT":
-            head[0] -= self.block_size
+            new_head[0] -= self.block_size
         elif self.direction == "DOWN":
-            head[1] += self.block_size
+            new_head[1] += self.block_size
         elif self.direction == "UP":
-            head[1] -= self.block_size
+            new_head[1] -= self.block_size
             
         # Check for collisions
-        if self._is_collision(head):
+        if self._is_collision(new_head):
             game_over = True
             reward = -10
             return reward, game_over, self.score
         
-        self.snake.insert(0, head)
+        # Compute new distance from the new head to food
+        new_food_dist = math.dist(new_head, self.food)
+        # Proximity reward: reward for moving closer to food, small penalty per step
+        reward += (prev_food_dist - new_food_dist) * 0.2
+        reward -= 0.1
+        
+        # Insert new head into the snake
+        self.snake.insert(0, new_head)
         
         # Check if food is eaten
-        if head == self.food:
+        if new_head == self.food:
             self.score += 1
-            reward = 10
+            reward = 10  # override reward if food is eaten
             self.food = self._spawn_food()
         else:
             self.snake.pop()
@@ -187,7 +216,7 @@ class SnakeGameAI:
         pygame.display.flip()
 
 # ---------------------------
-# Q-Learning Trainer with Vectorized Training Step
+# Q-Learning Trainer with Target Network and Gradient Clipping
 # ---------------------------
 class QTrainer:
     def __init__(self, model, lr, gamma):
@@ -196,9 +225,13 @@ class QTrainer:
         self.gamma = gamma
         self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
         self.criterion = nn.MSELoss()
-        
+        # Create target network
+        self.target_model = SnakeAI(model.input_size, model.hidden_size, model.output_size)
+        self.target_model.load_state_dict(model.state_dict())
+        self.target_update_counter = 0
+
     def train_step(self, state, action, reward, next_state, game_over):
-        # Convert data to tensors
+        # Convert data to tensors; if lists of samples, convert to batched tensors
         state      = torch.tensor(np.array(state), dtype=torch.float)
         next_state = torch.tensor(np.array(next_state), dtype=torch.float)
         action     = torch.tensor(np.array(action), dtype=torch.long)
@@ -211,34 +244,39 @@ class QTrainer:
             action     = torch.unsqueeze(action, 0)
             reward     = torch.unsqueeze(reward, 0)
             done       = torch.unsqueeze(done, 0)
-            
+        
         # Get predictions for current state (batch, num_actions)
         pred = self.model(state)
         
-        # Compute Q-values for the next state in a vectorized manner
+        # Use target network for next state Q-values
         with torch.no_grad():
-            q_next = self.model(next_state)
+            q_next = self.target_model(next_state)
             max_q_next, _ = torch.max(q_next, dim=1)
-            
+        
         # Compute target Q values: for terminal states, future reward is 0.
         q_target = reward + (1 - done) * self.gamma * max_q_next
         
-        # Gather predicted Q-values corresponding to the taken actions
+        # Gather predicted Q-values for the actions taken
         batch_indices = torch.arange(action.shape[0])
         action_indices = torch.argmax(action, dim=1)
         
-        # Clone predictions and update only the Q-value for the chosen action
         target = pred.clone()
         target[batch_indices, action_indices] = q_target
         
-        # Optimize the model
         self.optimizer.zero_grad()
-        loss = self.criterion(target, pred)
+        loss = self.criterion(pred, target)
         loss.backward()
+        # Gradient clipping to prevent exploding gradients
+        nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
+        
+        # Update target network every 100 training steps.
+        self.target_update_counter += 1
+        if self.target_update_counter % 100 == 0:
+            self.target_model.load_state_dict(self.model.state_dict())
 
 # ---------------------------
-# Training Loop with Experience Replay & Periodic Rendering
+# Training Loop with Experience Replay, Optimized Rendering, and TensorBoard Logging
 # ---------------------------
 def train():
     # Training hyperparameters
@@ -254,11 +292,20 @@ def train():
     memory = deque(maxlen=MAX_MEMORY)
     
     episodes = 1000
+    best_score = 0
+    writer = SummaryWriter()  # TensorBoard writer
+    
     for episode in range(episodes):
         state = game.reset()
         total_reward = 0
+        step_count = 0
+        
+        # Improved epsilon: minimum exploration rate is 0.01
+        epsilon = max(0.01, 1 - episode / (episodes * 0.8))
         
         while True:
+            step_count += 1
+            
             # Process pygame events to allow clean exit
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -267,18 +314,17 @@ def train():
             
             state_old = state
             
-            # Epsilon-greedy: linearly decaying epsilon
-            epsilon = 1 - episode / episodes
+            # Epsilon-greedy action selection
             if random.random() < epsilon:
-                move_index = random.randint(0, 2)
+                action_index = random.randint(0, 2)
             else:
-                state_tensor = torch.tensor(state, dtype=torch.float)
-                prediction = model(state_tensor)
-                move_index = torch.argmax(prediction).item()
+                with torch.no_grad():
+                    state_tensor = torch.tensor(state, dtype=torch.float)
+                    action_index = torch.argmax(model(state_tensor)).item()
             final_move = [0, 0, 0]
-            final_move[move_index] = 1
+            final_move[action_index] = 1
             
-            # Execute move and get feedback
+            # Execute move and get feedback from the environment
             reward, game_over, score = game.step(final_move)
             state_new = game.get_state()
             
@@ -288,7 +334,7 @@ def train():
             # Save experience into replay memory
             memory.append((state_old, final_move, reward, state_new, game_over))
             
-            # Train on a random sample from memory if enough samples are available
+            # Train on a random sample from replay memory if enough samples are available
             if len(memory) > BATCH_SIZE:
                 mini_sample = random.sample(memory, BATCH_SIZE)
                 states, actions, rewards, next_states, dones = zip(*mini_sample)
@@ -297,20 +343,33 @@ def train():
             state = state_new
             total_reward += reward
             
-            # Render only every 10 episodes for performance improvements
-            if episode % 10 == 0:
+            # Optimized rendering: render every 10 steps for episodes divisible by 50
+            if episode % 50 == 0 and step_count % 10 == 0:
                 game.render()
                 game.clock.tick(30)
             else:
                 game.clock.tick(300)
             
             if game_over:
+                # Save the best model based on score
+                if score > best_score:
+                    best_score = score
+                    torch.save(model.state_dict(), 'best_model.pth')
+                
                 print(f'Episode {episode}, Score: {score}, Total Reward: {total_reward}')
+                writer.add_scalar('Score', score, episode)
+                writer.add_scalar('Total Reward', total_reward, episode)
                 break
-            
-        # Save model periodically
+        
+        # Optional: Curriculum learning by adjusting difficulty after some episodes
+        if episode > 300:
+            game.block_size = 15
+        
+        # Periodically save model
         if episode % 100 == 0:
             torch.save(model.state_dict(), f'snake_model_{episode}.pth')
+            
+    writer.close()
 
 if __name__ == '__main__':
     train()
