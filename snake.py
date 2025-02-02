@@ -73,11 +73,11 @@ class Game:
         self.snake = [[WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2]]
         self.direction = "RIGHT"
         self.change_to = self.direction
-        self.food = self.spawn_food()
+        self.trap = None  # Initialize trap here before calling spawn_food()
+        self.food = self.spawn_food()  # Now spawn_food can safely check self.trap
         self.score = 0
         self.high_score = self.load_high_score()
         self.fps = INITIAL_FPS
-        self.trap = None
         self.last_trap_time = time.time()
         self.trap_warning = False
         self.warning_start = 0
@@ -88,6 +88,7 @@ class Game:
         self.growth_effect = False
         self.growth_effect_start = 0
         self.growth_effect_pos = None
+
 
     def load_high_score(self):
         try:
