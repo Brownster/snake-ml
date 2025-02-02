@@ -4,8 +4,9 @@ import random
 import time
 import math
 
-# Initialize Pygame
+# Initialize Pygame and Mixer
 pygame.init()
+pygame.mixer.init()
 
 # ---------------------------
 # Game Settings and Constants
@@ -24,7 +25,7 @@ RED        = (255, 0, 0)          # Regular food
 GOLD       = (255, 215, 0)        # Special food
 BLUE       = (0, 0, 255)          # Rare food
 PURPLE     = (148, 0, 211)        # Trap
-ORANGE     = (255, 165, 0)        # Warning color
+ORANGE     = (255, 165, 0)        # Warning / trap hit flash
 YELLOW     = (255, 255, 0)
 
 # Set up the game window
@@ -34,6 +35,15 @@ pygame.display.set_caption("Enhanced Snake Game")
 # Set up the clock and font
 clock = pygame.time.Clock()
 font = pygame.font.SysFont("Arial", 25)
+
+# Load sound effects (ensure these files exist in your directory)
+try:
+    FOOD_SOUND = pygame.mixer.Sound('bite.wav')
+    TRAP_SOUND = pygame.mixer.Sound('trap.wav')
+except Exception as e:
+    print("Sound files not found or error loading sounds:", e)
+    FOOD_SOUND = None
+    TRAP_SOUND = None
 
 # Food Types and their properties
 FOOD_TYPES = {
@@ -71,6 +81,13 @@ class Game:
         self.last_trap_time = time.time()
         self.trap_warning = False
         self.warning_start = 0
+        # For trap hit visual feedback
+        self.trap_hit_effect = False
+        self.effect_start = 0
+        # For snake growth animation
+        self.growth_effect = False
+        self.growth_effect_start = 0
+        self.growth_effect_pos = None
 
     def load_high_score(self):
         try:
@@ -145,9 +162,15 @@ class Game:
                 self.trap_warning = False
                 self.last_trap_time = current_time
 
-        # --- Food Expiration ---
+        # --- Food Expiration with Position Validation ---
         if self.food and current_time - self.food.spawn_time > 10:
-            self.food = self.spawn_food()
+            new_food = self.spawn_food()
+            if new_food:  # Only replace if valid food spawned
+                self.food = new_food
+            else:
+                # End game if spawn fails
+                self.game_over()
+                return False
 
         # Update snake movement
         self.direction = self.change_to
@@ -172,8 +195,12 @@ class Game:
 
         self.snake.insert(0, new_head)
 
-        # Check for trap collision
+        # --- Check for Trap Collision with Visual & Sound Feedback ---
         if self.trap and new_head == self.trap:
+            self.trap_hit_effect = True
+            self.effect_start = current_time
+            if TRAP_SOUND:
+                TRAP_SOUND.play()
             remove_count = max(1, len(self.snake) // 5)
             # Remove a portion from the tail
             self.snake = self.snake[:-remove_count]
@@ -181,20 +208,32 @@ class Game:
             self.last_trap_time = current_time
             self.score = max(0, self.score - 20)
 
-        # Check for food collision
+        # --- Check for Food Collision and Trigger Growth Animation ---
         elif self.food and new_head == self.food.position:
+            if FOOD_SOUND:
+                FOOD_SOUND.play()
             self.score += self.food.properties['points']
+            self.growth_effect = True
+            self.growth_effect_start = current_time
+            self.growth_effect_pos = self.food.position.copy()  # store position for the animation
             self.food = self.spawn_food()
-            # Increase game speed every 50 points (up to a maximum)
-            if self.score % 50 == 0:
-                self.fps = min(self.fps + 1, 20)
+            # Gradual speed increase: increase fps as score increases (capped at 20)
+            self.fps = min(INITIAL_FPS + (self.score // 10), 20)
         else:
             self.snake.pop()
         
         return True
 
     def draw(self):
-        screen.fill(BLACK)
+        # If a trap was hit recently, flash the screen with ORANGE for 1 second.
+        if self.trap_hit_effect:
+            if time.time() - self.effect_start < 1:
+                screen.fill(ORANGE)
+            else:
+                self.trap_hit_effect = False
+                screen.fill(BLACK)
+        else:
+            screen.fill(BLACK)
         
         # --- Draw Trap Warning ---
         if self.trap_warning:
@@ -241,6 +280,17 @@ class Game:
                 self.draw_text(f"+{self.food.properties['points']}", 
                                food_pos[0] - 10, food_pos[1] - 20, self.food.properties['color'])
         
+        # --- Draw Snake Growth Animation ---
+        if self.growth_effect and self.growth_effect_pos:
+            effect_duration = 0.5  # seconds
+            elapsed = time.time() - self.growth_effect_start
+            if elapsed < effect_duration:
+                # Expand circle radius from BLOCK_SIZE to 2*BLOCK_SIZE over the duration
+                effect_radius = int(BLOCK_SIZE * (1 + elapsed / effect_duration))
+                pygame.draw.circle(screen, YELLOW, self.growth_effect_pos, effect_radius)
+            else:
+                self.growth_effect = False
+
         # --- Draw Score and Info ---
         self.draw_text(f"Score: {self.score}", 10, 10)
         self.draw_text(f"High Score: {self.high_score}", 10, 40)
@@ -266,10 +316,14 @@ class Game:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_p:
                     paused = False
                     pause_duration = time.time() - pause_start
-                    # Adjust trap timers by the pause duration
+                    # Adjust trap timers and effect timers by the pause duration
                     self.last_trap_time += pause_duration
                     if self.trap_warning:
                         self.warning_start += pause_duration
+                    if self.trap_hit_effect:
+                        self.effect_start += pause_duration
+                    if self.growth_effect:
+                        self.growth_effect_start += pause_duration
 
     def game_over(self):
         self.save_high_score()
