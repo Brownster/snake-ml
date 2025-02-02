@@ -71,48 +71,75 @@ class SnakeGameAI:
     
     def get_state(self):
         head = self.snake[0]
-        
-        # Define points around the head for collision checks
+        # Define points around the head for collision detection.
         point_l = [head[0] - self.block_size, head[1]]
         point_r = [head[0] + self.block_size, head[1]]
         point_u = [head[0], head[1] - self.block_size]
         point_d = [head[0], head[1] + self.block_size]
         
-        # Current direction booleans
+        # Direction flags
         dir_l = self.direction == "LEFT"
         dir_r = self.direction == "RIGHT"
         dir_u = self.direction == "UP"
         dir_d = self.direction == "DOWN"
         
+        # Danger assessments
+        danger_straight = ((dir_r and self._is_collision(point_r)) or
+                           (dir_l and self._is_collision(point_l)) or
+                           (dir_u and self._is_collision(point_u)) or
+                           (dir_d and self._is_collision(point_d)))
+        danger_right = ((dir_u and self._is_collision(point_r)) or
+                        (dir_d and self._is_collision(point_l)) or
+                        (dir_l and self._is_collision(point_u)) or
+                        (dir_r and self._is_collision(point_d)))
+        danger_left = ((dir_d and self._is_collision(point_r)) or
+                       (dir_u and self._is_collision(point_l)) or
+                       (dir_r and self._is_collision(point_u)) or
+                       (dir_l and self._is_collision(point_d)))
+        
+        # Food relative to head
+        food_left = self.food[0] < head[0]
+        food_right = self.food[0] > head[0]
+        food_up = self.food[1] < head[1]
+        food_down = self.food[1] > head[1]
+        
+        # Since in play you might not use food type and trap info,
+        # you can assume defaults (if your training always used these):
+        food_type_regular = 1  # e.g., assume food is always regular
+        food_type_special = 0
+        food_type_rare = 0
+        trap_exists = 0
+        trap_left = 0
+        trap_right = 0
+        trap_up = 0
+        trap_down = 0
+        trap_warning_flag = 0
+        
+        # Construct state vector with 20 features
         state = [
-            # Danger straight ahead
-            (dir_r and self._is_collision(point_r)) or
-            (dir_l and self._is_collision(point_l)) or
-            (dir_u and self._is_collision(point_u)) or
-            (dir_d and self._is_collision(point_d)),
-            
-            # Danger right
-            (dir_u and self._is_collision(point_r)) or
-            (dir_d and self._is_collision(point_l)) or
-            (dir_l and self._is_collision(point_u)) or
-            (dir_r and self._is_collision(point_d)),
-            
-            # Danger left
-            (dir_d and self._is_collision(point_r)) or
-            (dir_u and self._is_collision(point_l)) or
-            (dir_r and self._is_collision(point_u)) or
-            (dir_l and self._is_collision(point_d)),
-            
-            # Current move direction
-            dir_l, dir_r, dir_u, dir_d,
-            
-            # Food location relative to head
-            self.food[0] < head[0],  # food is left
-            self.food[0] > head[0],  # food is right
-            self.food[1] < head[1],  # food is up
-            self.food[1] > head[1]   # food is down
+            int(danger_straight),
+            int(danger_right),
+            int(danger_left),
+            int(dir_l),
+            int(dir_r),
+            int(dir_u),
+            int(dir_d),
+            int(food_left),
+            int(food_right),
+            int(food_up),
+            int(food_down),
+            food_type_regular,
+            food_type_special,
+            food_type_rare,
+            trap_exists,
+            trap_left,
+            trap_right,
+            trap_up,
+            trap_down,
+            trap_warning_flag
         ]
         return np.array(state, dtype=int)
+
     
     def _is_collision(self, point):
         # Check for wall collisions
@@ -179,7 +206,7 @@ class SnakeGameAI:
 # ---------------------------
 def play():
     # Load the trained model weights
-    model = SnakeAI(11, 256, 3)
+    model = SnakeAI(20, 256, 3)
     model.load_state_dict(torch.load('best_model.pth'))  # Make sure this file exists
     model.eval()  # Set model to evaluation mode
     
