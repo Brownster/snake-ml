@@ -1,15 +1,17 @@
 import pygame
+import random
+import time
+import math
+import numpy as np
+from collections import deque
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-import random
-from collections import deque
-import math
 from torch.utils.tensorboard import SummaryWriter
 
 # ---------------------------
-# Helper Function for Direction Mapping
+# Helper: Direction Mapping
 # ---------------------------
 # Action indices: 0 = turn right, 1 = straight, 2 = turn left.
 def get_new_direction(current, action_index):
@@ -21,21 +23,276 @@ def get_new_direction(current, action_index):
     }
     return mapping[current][action_index]
 
-def test_direction_mapping():
-    assert get_new_direction("UP", 0) == "RIGHT"
-    assert get_new_direction("UP", 1) == "UP"
-    assert get_new_direction("UP", 2) == "LEFT"
-    assert get_new_direction("RIGHT", 0) == "DOWN"
-    assert get_new_direction("RIGHT", 1) == "RIGHT"
-    assert get_new_direction("RIGHT", 2) == "UP"
-    assert get_new_direction("DOWN", 0) == "LEFT"
-    assert get_new_direction("DOWN", 1) == "DOWN"
-    assert get_new_direction("DOWN", 2) == "RIGHT"
-    assert get_new_direction("LEFT", 0) == "UP"
-    assert get_new_direction("LEFT", 1) == "LEFT"
-    assert get_new_direction("LEFT", 2) == "DOWN"
+# ---------------------------
+# Environment: Enhanced SnakeGameAI
+# ---------------------------
+class SnakeGameAI:
+    def __init__(self, width=600, height=400, block_size=20):
+        self.width = width
+        self.height = height
+        self.block_size = block_size
 
-test_direction_mapping()
+        # Initialize pygame
+        pygame.init()
+        self.screen = pygame.display.set_mode((width, height))
+        pygame.display.set_caption('Snake AI Training')
+        self.clock = pygame.time.Clock()
+
+        self.reset()
+
+    def reset(self):
+        # Initialize snake in the middle of the screen
+        self.snake = [[self.width // 2, self.height // 2]]
+        self.direction = "RIGHT"
+        self.food = self._spawn_food()
+        self.score = 0
+        self.frame_iteration = 0
+
+        # Trap-related variables
+        self.trap = None
+        self.trap_warning = False
+        self.last_trap_time = time.time()
+        self.warning_start = 0
+
+        return self.get_state()
+
+    def _spawn_food(self):
+        # Define food types with properties
+        FOOD_TYPES = {
+            'regular': {'color': (255, 0, 0), 'points': 10, 'chance': 70},
+            'special': {'color': (255, 215, 0), 'points': 20, 'chance': 20},
+            'rare':    {'color': (0, 0, 255), 'points': 50, 'chance': 10}
+        }
+        # Choose food type based on chance
+        rand = random.randint(1, 100)
+        cumulative = 0
+        food_type = 'regular'
+        for t, props in FOOD_TYPES.items():
+            cumulative += props['chance']
+            if rand <= cumulative:
+                food_type = t
+                break
+
+        # Spawn food at a random position not occupied by the snake (or trap)
+        while True:
+            x = random.randrange(0, self.width, self.block_size)
+            y = random.randrange(0, self.height, self.block_size)
+            if [x, y] not in self.snake and (self.trap is None or [x, y] != self.trap):
+                return {
+                    'position': [x, y],
+                    'type': food_type,
+                    'points': FOOD_TYPES[food_type]['points'],
+                    'spawn_time': time.time()
+                }
+
+    def _spawn_trap(self):
+        # Spawn a trap at a random location not occupied by the snake or the current food
+        while True:
+            x = random.randrange(0, self.width, self.block_size)
+            y = random.randrange(0, self.height, self.block_size)
+            if [x, y] not in self.snake and (self.food is None or [x, y] != self.food['position']):
+                return [x, y]
+
+    def get_state(self):
+        head = self.snake[0]
+
+        # Points adjacent to the head (for collision/danger checks)
+        point_l = [head[0] - self.block_size, head[1]]
+        point_r = [head[0] + self.block_size, head[1]]
+        point_u = [head[0], head[1] - self.block_size]
+        point_d = [head[0], head[1] + self.block_size]
+
+        # Current direction booleans
+        dir_l = self.direction == "LEFT"
+        dir_r = self.direction == "RIGHT"
+        dir_u = self.direction == "UP"
+        dir_d = self.direction == "DOWN"
+
+        # Basic danger flags (if a collision would occur moving straight/right/left)
+        danger_straight = ((dir_r and self._is_collision(point_r)) or
+                           (dir_l and self._is_collision(point_l)) or
+                           (dir_u and self._is_collision(point_u)) or
+                           (dir_d and self._is_collision(point_d)))
+
+        danger_right = ((dir_u and self._is_collision(point_r)) or
+                        (dir_d and self._is_collision(point_l)) or
+                        (dir_l and self._is_collision(point_u)) or
+                        (dir_r and self._is_collision(point_d)))
+
+        danger_left = ((dir_d and self._is_collision(point_r)) or
+                       (dir_u and self._is_collision(point_l)) or
+                       (dir_r and self._is_collision(point_u)) or
+                       (dir_l and self._is_collision(point_d)))
+
+        # Food relative location flags
+        food_left = self.food['position'][0] < head[0]
+        food_right = self.food['position'][0] > head[0]
+        food_up = self.food['position'][1] < head[1]
+        food_down = self.food['position'][1] > head[1]
+
+        # Food type one-hot encoding
+        food_type_regular = 1 if self.food['type'] == 'regular' else 0
+        food_type_special = 1 if self.food['type'] == 'special' else 0
+        food_type_rare = 1 if self.food['type'] == 'rare' else 0
+
+        # Trap-related information
+        trap_exists = 1 if self.trap is not None else 0
+        if self.trap is not None:
+            trap_left = 1 if self.trap[0] < head[0] else 0
+            trap_right = 1 if self.trap[0] > head[0] else 0
+            trap_up = 1 if self.trap[1] < head[1] else 0
+            trap_down = 1 if self.trap[1] > head[1] else 0
+        else:
+            trap_left = trap_right = trap_up = trap_down = 0
+
+        # Trap warning flag (active during the 2-second warning phase)
+        trap_warning_flag = 1 if self.trap_warning else 0
+
+        # Assemble state vector (20 features)
+        state = [
+            int(danger_straight),
+            int(danger_right),
+            int(danger_left),
+            int(dir_l),
+            int(dir_r),
+            int(dir_u),
+            int(dir_d),
+            int(food_left),
+            int(food_right),
+            int(food_up),
+            int(food_down),
+            food_type_regular,
+            food_type_special,
+            food_type_rare,
+            trap_exists,
+            trap_left,
+            trap_right,
+            trap_up,
+            trap_down,
+            trap_warning_flag
+        ]
+        return np.array(state, dtype=int)
+
+    def _is_collision(self, point):
+        # Check if a point collides with the wall or with the snake's own body
+        if (point[0] >= self.width or point[0] < 0 or 
+            point[1] >= self.height or point[1] < 0):
+            return True
+        if point in self.snake[1:]:
+            return True
+        return False
+
+    def step(self, action):
+        """
+        Takes an action (a one-hot list of length 3: [turn right, straight, turn left])
+        and updates the environment.
+        Returns: reward, game_over, score.
+        """
+        self.frame_iteration += 1
+        reward = 0
+        game_over = False
+        current_time = time.time()
+
+        # ---- Trap Logic ----
+        if self.trap is None and current_time - self.last_trap_time >= 10:
+            # Begin warning phase for 2 seconds before spawning trap
+            if not self.trap_warning:
+                self.trap_warning = True
+                self.warning_start = current_time
+            elif current_time - self.warning_start >= 2:
+                self.trap = self._spawn_trap()
+                self.trap_warning = False
+                self.last_trap_time = current_time
+
+        # ---- Food Expiration ----
+        if self.food and current_time - self.food['spawn_time'] > 10:
+            self.food = self._spawn_food()
+
+        # ---- Compute Distance to Food ----
+        prev_food_dist = math.dist(self.snake[0], self.food['position'])
+
+        # ---- Update Direction Based on Action ----
+        action_index = np.argmax(action)
+        self.direction = get_new_direction(self.direction, action_index)
+
+        new_head = self.snake[0].copy()
+        if self.direction == "RIGHT":
+            new_head[0] += self.block_size
+        elif self.direction == "LEFT":
+            new_head[0] -= self.block_size
+        elif self.direction == "DOWN":
+            new_head[1] += self.block_size
+        elif self.direction == "UP":
+            new_head[1] -= self.block_size
+
+        # ---- Check for Collisions ----
+        if self._is_collision(new_head):
+            game_over = True
+            reward = -10
+            return reward, game_over, self.score
+
+        # ---- Check for Trap Collision ----
+        if self.trap and new_head == self.trap:
+            # Hitting a trap penalizes the snake
+            reward -= 20
+            self.trap = None
+            self.last_trap_time = current_time
+
+        # ---- Proximity Reward ----
+        new_food_dist = math.dist(new_head, self.food['position'])
+        reward += (prev_food_dist - new_food_dist) * 0.2
+        reward -= 0.1
+
+        # ---- Move Snake ----
+        self.snake.insert(0, new_head)
+
+        # ---- Check if Food is Eaten ----
+        if new_head == self.food['position']:
+            self.score += self.food['points']
+            reward += self.food['points']  # reward proportional to food type
+            self.food = self._spawn_food()
+        else:
+            self.snake.pop()
+
+        # ---- Timeout Penalty ----
+        if self.frame_iteration > 100 * len(self.snake):
+            game_over = True
+            reward = -10
+
+        return reward, game_over, self.score
+
+    def render(self):
+        # Draw the environment
+        self.screen.fill((0, 0, 0))
+
+        # Draw snake segments
+        for i, segment in enumerate(self.snake):
+            color = (0, 128, 128) if i == 0 else (0, 150, 150)
+            pygame.draw.rect(self.screen, color,
+                             pygame.Rect(segment[0], segment[1], self.block_size, self.block_size))
+
+        # Draw food with color based on type
+        food_color = (255, 0, 0)  # default regular
+        if self.food['type'] == 'special':
+            food_color = (255, 215, 0)
+        elif self.food['type'] == 'rare':
+            food_color = (0, 0, 255)
+        pygame.draw.rect(self.screen, food_color,
+                         pygame.Rect(self.food['position'][0], self.food['position'][1],
+                                     self.block_size, self.block_size))
+
+        # Draw trap if it exists
+        if self.trap:
+            pygame.draw.rect(self.screen, (148, 0, 211),
+                             pygame.Rect(self.trap[0], self.trap[1], self.block_size, self.block_size))
+
+        # Optionally, display trap warning
+        if self.trap_warning:
+            font = pygame.font.SysFont("Arial", 25)
+            text_surface = font.render("TRAP WARNING", True, (255, 165, 0))
+            self.screen.blit(text_surface, (self.width // 2 - 50, self.height - 30))
+
+        pygame.display.flip()
 
 # ---------------------------
 # Neural Network for Snake AI
@@ -57,165 +314,6 @@ class SnakeAI(nn.Module):
         return x
 
 # ---------------------------
-# Snake Game Environment for AI Training
-# ---------------------------
-class SnakeGameAI:
-    def __init__(self, width=600, height=400, block_size=20):
-        self.width = width
-        self.height = height
-        self.block_size = block_size
-        
-        # Initialize pygame
-        pygame.init()
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption('Snake AI Training')
-        self.clock = pygame.time.Clock()
-        
-        self.reset()
-        
-    def reset(self):
-        # Initialize snake in the middle of the screen
-        self.snake = [[self.width // 2, self.height // 2]]
-        self.direction = "RIGHT"
-        self.food = self._spawn_food()
-        self.score = 0
-        self.frame_iteration = 0
-        return self.get_state()
-        
-    def _spawn_food(self):
-        while True:
-            x = random.randrange(0, self.width, self.block_size)
-            y = random.randrange(0, self.height, self.block_size)
-            if [x, y] not in self.snake:
-                return [x, y]
-    
-    def get_state(self):
-        head = self.snake[0]
-        
-        # Define points around the head (for collision checks)
-        point_l = [head[0] - self.block_size, head[1]]
-        point_r = [head[0] + self.block_size, head[1]]
-        point_u = [head[0], head[1] - self.block_size]
-        point_d = [head[0], head[1] + self.block_size]
-        
-        # Current direction booleans
-        dir_l = self.direction == "LEFT"
-        dir_r = self.direction == "RIGHT"
-        dir_u = self.direction == "UP"
-        dir_d = self.direction == "DOWN"
-        
-        state = [
-            # Danger straight ahead
-            (dir_r and self._is_collision(point_r)) or
-            (dir_l and self._is_collision(point_l)) or
-            (dir_u and self._is_collision(point_u)) or
-            (dir_d and self._is_collision(point_d)),
-            
-            # Danger right
-            (dir_u and self._is_collision(point_r)) or
-            (dir_d and self._is_collision(point_l)) or
-            (dir_l and self._is_collision(point_u)) or
-            (dir_r and self._is_collision(point_d)),
-            
-            # Danger left
-            (dir_d and self._is_collision(point_r)) or
-            (dir_u and self._is_collision(point_l)) or
-            (dir_r and self._is_collision(point_u)) or
-            (dir_l and self._is_collision(point_d)),
-            
-            # Current move direction
-            dir_l, dir_r, dir_u, dir_d,
-            
-            # Food location relative to head
-            self.food[0] < head[0],  # food is left
-            self.food[0] > head[0],  # food is right
-            self.food[1] < head[1],  # food is up
-            self.food[1] > head[1]   # food is down
-        ]
-        
-        return np.array(state, dtype=int)
-    
-    def _is_collision(self, point):
-        # Check for wall collision
-        if (point[0] >= self.width or point[0] < 0 or 
-            point[1] >= self.height or point[1] < 0):
-            return True
-        # Check for collision with itself
-        if point in self.snake[1:]:
-            return True
-        return False
-    
-    def step(self, action):
-        self.frame_iteration += 1
-        reward = 0
-        game_over = False
-        
-        # Compute previous distance from head to food
-        prev_food_dist = math.dist(self.snake[0], self.food)
-        
-        # Convert one-hot action into an index (0 = turn right, 1 = straight, 2 = turn left)
-        action_index = np.argmax(action)
-        # Update the snake's direction using the helper function
-        self.direction = get_new_direction(self.direction, action_index)
-        
-        new_head = self.snake[0].copy()
-        if self.direction == "RIGHT":
-            new_head[0] += self.block_size
-        elif self.direction == "LEFT":
-            new_head[0] -= self.block_size
-        elif self.direction == "DOWN":
-            new_head[1] += self.block_size
-        elif self.direction == "UP":
-            new_head[1] -= self.block_size
-            
-        # Check for collisions
-        if self._is_collision(new_head):
-            game_over = True
-            reward = -10
-            return reward, game_over, self.score
-        
-        # Compute new distance from the new head to food
-        new_food_dist = math.dist(new_head, self.food)
-        # Proximity reward: reward for moving closer to food, small penalty per step
-        reward += (prev_food_dist - new_food_dist) * 0.2
-        reward -= 0.1
-        
-        # Insert new head into the snake
-        self.snake.insert(0, new_head)
-        
-        # Check if food is eaten
-        if new_head == self.food:
-            self.score += 1
-            reward = 10  # override reward if food is eaten
-            self.food = self._spawn_food()
-        else:
-            self.snake.pop()
-        
-        # Timeout penalty to discourage endless wandering
-        if self.frame_iteration > 100 * len(self.snake):
-            game_over = True
-            reward = -10
-            
-        return reward, game_over, self.score
-    
-    def render(self):
-        self.screen.fill((0, 0, 0))
-        
-        # Draw snake (head and body)
-        for i, segment in enumerate(self.snake):
-            color = (0, 128, 128) if i == 0 else (0, 150, 150)
-            pygame.draw.rect(self.screen, color, 
-                             pygame.Rect(segment[0], segment[1], 
-                                         self.block_size, self.block_size))
-        
-        # Draw food
-        pygame.draw.rect(self.screen, (255, 0, 0), 
-                         pygame.Rect(self.food[0], self.food[1], 
-                                     self.block_size, self.block_size))
-        
-        pygame.display.flip()
-
-# ---------------------------
 # Q-Learning Trainer with Target Network and Gradient Clipping
 # ---------------------------
 class QTrainer:
@@ -225,13 +323,13 @@ class QTrainer:
         self.gamma = gamma
         self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
         self.criterion = nn.MSELoss()
-        # Create target network
+        # Create target network using the same architecture as model.
         self.target_model = SnakeAI(model.input_size, model.hidden_size, model.output_size)
         self.target_model.load_state_dict(model.state_dict())
         self.target_update_counter = 0
 
     def train_step(self, state, action, reward, next_state, game_over):
-        # Convert data to tensors; if lists of samples, convert to batched tensors
+        # Convert data to tensors (if not already in batched form)
         state      = torch.tensor(np.array(state), dtype=torch.float)
         next_state = torch.tensor(np.array(next_state), dtype=torch.float)
         action     = torch.tensor(np.array(action), dtype=torch.long)
@@ -253,7 +351,7 @@ class QTrainer:
             q_next = self.target_model(next_state)
             max_q_next, _ = torch.max(q_next, dim=1)
         
-        # Compute target Q values: for terminal states, future reward is 0.
+        # Compute target Q values (for terminal states, future reward is 0)
         q_target = reward + (1 - done) * self.gamma * max_q_next
         
         # Gather predicted Q-values for the actions taken
@@ -286,8 +384,9 @@ def train():
     GAMMA = 0.9
     
     # Initialize game, model, trainer, and replay memory
+    # NOTE: The model's input size is now 20 to match the enhanced state representation.
     game = SnakeGameAI()
-    model = SnakeAI(11, 256, 3)  # 11 input states, 256 hidden neurons, 3 actions
+    model = SnakeAI(20, 256, 3)  # 20 input features, 256 hidden neurons, 3 actions
     trainer = QTrainer(model, lr=LR, gamma=GAMMA)
     memory = deque(maxlen=MAX_MEMORY)
     
@@ -306,7 +405,7 @@ def train():
         while True:
             step_count += 1
             
-            # Process pygame events to allow clean exit
+            # Process pygame events to allow a clean exit
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
@@ -365,7 +464,7 @@ def train():
         if episode > 300:
             game.block_size = 15
         
-        # Periodically save model
+        # Periodically save model checkpoints
         if episode % 100 == 0:
             torch.save(model.state_dict(), f'snake_model_{episode}.pth')
             
