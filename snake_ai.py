@@ -44,17 +44,21 @@ class SnakeGameAI:
         # Initialize snake in the middle of the screen
         self.snake = [[self.width // 2, self.height // 2]]
         self.direction = "RIGHT"
-        self.food = self._spawn_food()
-        self.score = 0
-        self.frame_iteration = 0
-
-        # Trap-related variables
+        
+        # Initialize trap-related variables BEFORE spawning food
         self.trap = None
         self.trap_warning = False
         self.last_trap_time = time.time()
         self.warning_start = 0
-
+    
+        # Now safe to spawn food, as self.trap is defined
+        self.food = self._spawn_food()
+        
+        self.score = 0
+        self.frame_iteration = 0
+    
         return self.get_state()
+
 
     def _spawn_food(self):
         # Define food types with properties
