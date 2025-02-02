@@ -286,26 +286,6 @@ Adjust rendering frequency during training to speed up learning without sacrific
         if episode % 50 == 0 and step_count % 10 == 0:
             game.render()
 
-Summary of Key Levers
-
-Exploration	epsilon, decay_rate	Balances random exploration vs. following the learned policy.
-Reward Shaping	
-Reward values, proximity multiplier, time penalty - Encourages desired behaviors (e.g., food-seeking, trap avoidance) and discourages indecision.
-Neural Network	
-Hidden layers, neurons, activation functions - Controls the model’s capacity to learn complex strategies.
-Training Hyperparameters	
-LR, GAMMA, BATCH_SIZE, MAX_MEMORY - Affects convergence speed, stability, and memory usage.
-Environment Settings	
-block_size, trap frequency, food expiration	Adjusts the overall difficulty and complexity of the game.
-Curriculum Learning	
-Gradual changes (e.g., block size reduction) - Increases difficulty as the agent improves to promote robust learning.
-Logging & Visualization	
-TensorBoard metrics, rendering frequency - Provides insights into the training process and helps with debugging.
-
-
-
-By adjusting these parameters, you can fine‑tune the training process to achieve better performance or faster convergence. Experimentation is key—try different settings to see which combination works best for your specific implementation.
-
 
 Contributing
 
