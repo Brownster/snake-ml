@@ -15,6 +15,9 @@ import logging
 import requests
 import random
 
+#############################
+# PlateauDetector
+#############################
 class PlateauDetector:
     """Detects performance plateaus for early stopping and parameter adjustment"""
     def __init__(self, window_size=50, threshold=0.01):
@@ -49,6 +52,9 @@ class PlateauDetector:
         
         return score_std < self.threshold and abs(avg_improvement) < self.threshold
 
+#############################
+# ModelCheckpointer
+#############################
 class ModelCheckpointer:
     """Handles model saving and loading with comprehensive tracking"""
     def __init__(self, log_dir):
@@ -98,12 +104,15 @@ class ModelCheckpointer:
             return None, None
         
         best_model_path = max(self.saved_models, 
-                            key=lambda x: self.model_metrics[x]['score'])
+                              key=lambda x: self.model_metrics[x]['score'])
         checkpoint = torch.load(best_model_path)
         return checkpoint['model_state_dict'], checkpoint['info']
 
+#############################
+# MetricsTracker (High-level training metrics)
+#############################
 class MetricsTracker:
-    """Comprehensive metrics tracking and analysis"""
+    """Comprehensive metrics tracking and analysis for training performance"""
     def __init__(self):
         self.episode_metrics = []
         self.cycle_metrics = []
@@ -118,17 +127,17 @@ class MetricsTracker:
         """Update episode-level metrics"""
         self.episode_metrics.append(metrics)
         
-        # Update learning curves
+        # Update learning curves every 100 episodes
         if len(self.episode_metrics) % 100 == 0:
             self.global_metrics['learning_curves'].append({
                 'episodes': len(self.episode_metrics),
-                'avg_score': np.mean([m['score'] for m in self.episode_metrics[-100:]]),
+                'avg_score': np.mean([m['avg_score'] for m in self.episode_metrics[-100:]]),
                 'avg_loss': np.mean([m['avg_loss'] for m in self.episode_metrics[-100:]])
             })
     
     def update_cycle(self, cycle_results, config):
-        """Update cycle-level metrics"""
-        avg_score = np.mean([r['metrics']['avg_score'] for r in cycle_results])
+        """Update cycle-level metrics and parameter impact"""
+        avg_score = np.mean([r['evaluation_metrics']['avg_score'] for r in cycle_results])
         self.cycle_metrics.append({
             'config': config,
             'avg_score': avg_score,
@@ -173,6 +182,24 @@ class MetricsTracker:
             }
         
         return recommendations
+    
+    def get_summary(self):
+        """Return a summary of recent training performance"""
+        if not self.episode_metrics:
+            return {}
+        recent = self.episode_metrics[-100:]
+        return {
+            'recent_avg_score': np.mean([m['avg_score'] for m in recent]),
+            'recent_avg_loss': np.mean([m['avg_loss'] for m in recent]),
+            'best_score': self.global_metrics['best_score'],
+            'total_episodes': len(self.episode_metrics)
+        }
+
+#############################
+# GameStateTracker (In-game tracking)
+#############################
+class GameStateTracker:
+    """Tracks in-game events and state"""
     def __init__(self, grid_width, grid_height, block_size):
         self.grid_width = grid_width
         self.grid_height = grid_height
@@ -195,7 +222,6 @@ class MetricsTracker:
         return (pos[0] // self.block_size, pos[1] // self.block_size)
     
     def update(self, game_state, action, reward, done):
-        """Update tracker with normalized positions and additional metrics"""
         head_pos = game_state.snake[0]
         norm_pos = self._normalize_position(head_pos)
         self.position_history.append(norm_pos)
@@ -207,6 +233,7 @@ class MetricsTracker:
                 self.collision_positions.append(norm_pos)
             self.scores.append(game_state.score)
         
+        # Ensure game_state.food is a dict with key 'position'
         if game_state.food and head_pos == game_state.food['position']:
             self.food_positions.append(norm_pos)
             self.moves_per_food.append(self.current_moves)
@@ -214,9 +241,8 @@ class MetricsTracker:
         
         if game_state.trap and head_pos == game_state.trap:
             self.trap_positions.append(norm_pos)
-
+    
     def get_metrics(self):
-        """Calculate comprehensive gameplay metrics"""
         return {
             'avg_score': np.mean(self.scores) if self.scores else 0,
             'max_score': max(self.scores) if self.scores else 0,
@@ -225,6 +251,9 @@ class MetricsTracker:
             'food_efficiency': len(self.food_positions) / self.current_moves if self.current_moves > 0 else 0
         }
 
+#############################
+# Visualizer
+#############################
 class Visualizer:
     """Enhanced visualizer with dynamic grid sizing and advanced metrics plotting"""
     def __init__(self, log_dir, grid_cols, grid_rows):
@@ -292,6 +321,9 @@ class Visualizer:
         self.writer.add_figure('Training Progress', fig)
         plt.close()
 
+#############################
+# HyperparameterTuner
+#############################
 class HyperparameterTuner:
     """Improved hyperparameter tuner with range validation and adaptive updates"""
     def __init__(self, base_config):
@@ -349,7 +381,7 @@ class HyperparameterTuner:
             param_performance[param] = {}
             for result in results:
                 value = result['config'][param]
-                score = result['metrics']['avg_score']
+                score = result['evaluation_metrics']['avg_score']
                 if value not in param_performance[param]:
                     param_performance[param][value] = []
                 param_performance[param][value].append(score)
@@ -360,10 +392,7 @@ class HyperparameterTuner:
                 continue
             
             # Calculate mean performance for each value
-            mean_performances = {
-                value: np.mean(scores) 
-                for value, scores in performances.items()
-            }
+            mean_performances = {value: np.mean(scores) for value, scores in performances.items()}
             
             # Find best performing value
             best_value = max(mean_performances.items(), key=lambda x: x[1])[0]
@@ -373,20 +402,15 @@ class HyperparameterTuner:
                 new_range = [best_value * 0.5, best_value, best_value * 2.0]
             elif param == 'GAMMA':
                 step = 0.05
-                new_range = [
-                    max(0.8, best_value - step),
-                    best_value,
-                    min(0.99, best_value + step)
-                ]
+                new_range = [max(0.8, best_value - step), best_value, min(0.99, best_value + step)]
             elif param in ['HIDDEN_SIZE', 'BATCH_SIZE']:
-                new_range = [
-                    max(64, best_value // 2),
-                    best_value,
-                    best_value * 2
-                ]
+                new_range = [max(64, best_value // 2), best_value, best_value * 2]
             
             self.param_ranges[param] = sorted(list(set(new_range)))
 
+#############################
+# QTrainer
+#############################
 class QTrainer(nn.Module):
     """Enhanced QTrainer with advanced features"""
     def __init__(self, model, lr, gamma):
@@ -454,7 +478,7 @@ class QTrainer(nn.Module):
         
         self.optimizer.step()
         
-        # Update target network
+        # Update target network periodically
         self.target_update_counter += 1
         if self.target_update_counter % 100 == 0:
             self.target_model.load_state_dict(self.model.state_dict())
@@ -462,7 +486,7 @@ class QTrainer(nn.Module):
         # Store loss
         self.loss_history.append(loss.item())
         return loss.item()
-
+    
     def get_metrics(self):
         """Calculate training metrics"""
         return {
@@ -472,6 +496,9 @@ class QTrainer(nn.Module):
             'max_loss': max(self.loss_history) if self.loss_history else 0
         }
 
+#############################
+# MLFeedbackLoop
+#############################
 class MLFeedbackLoop:
     """Integrated feedback loop system with comprehensive monitoring"""
     def __init__(self, game_env, model_class, log_dir='logs'):
@@ -480,15 +507,13 @@ class MLFeedbackLoop:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
         
-        # Initialize components
+        # Initialize components with game dimensions
         grid_width = game_env.width
         grid_height = game_env.height
         block_size = game_env.block_size
         
         self.state_tracker = GameStateTracker(grid_width, grid_height, block_size)
-        self.visualizer = Visualizer(log_dir, 
-                                   self.state_tracker.grid_cols, 
-                                   self.state_tracker.grid_rows)
+        self.visualizer = Visualizer(log_dir, self.state_tracker.grid_cols, self.state_tracker.grid_rows)
         self.tuner = HyperparameterTuner({
             'MAX_MEMORY': 100_000,
             'BATCH_SIZE': 1000,
@@ -497,15 +522,12 @@ class MLFeedbackLoop:
             'HIDDEN_SIZE': 256,
             'EPISODES': 1000
         })
-        
         self.results = []
         self.best_model = None
         self.metrics_history = []
-        
-        # Add new components while preserving original functionality
+        self.metrics_tracker = MetricsTracker()
         self.checkpointer = ModelCheckpointer(log_dir)
         self.plateau_detector = PlateauDetector()
-        self.metrics_tracker = MetricsTracker()
         
         # Configure logging with multiple handlers
         self._setup_logging()
@@ -519,9 +541,7 @@ class MLFeedbackLoop:
         logger.handlers = []
         
         # File handler for detailed logging
-        fh = logging.FileHandler(
-            self.log_dir / f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-        )
+        fh = logging.FileHandler(self.log_dir / f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
         fh.setLevel(logging.INFO)
         
         # Console handler for basic progress
@@ -529,12 +549,8 @@ class MLFeedbackLoop:
         ch.setLevel(logging.INFO)
         
         # Create formatters and add to handlers
-        detailed_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        simple_formatter = logging.Formatter(
-            '%(levelname)s - %(message)s'
-        )
+        detailed_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        simple_formatter = logging.Formatter('%(levelname)s - %(message)s')
         
         fh.setFormatter(detailed_formatter)
         ch.setFormatter(simple_formatter)
@@ -546,9 +562,11 @@ class MLFeedbackLoop:
     
     def train_model(self, config):
         """Complete training cycle with metrics tracking"""
+        # Note: adjust input size if needed; currently using 20 as input size.
         model = self.model_class(20, config['HIDDEN_SIZE'], 3)
         memory = deque(maxlen=config['MAX_MEMORY'])
         trainer = QTrainer(model, config['LR'], config['GAMMA'])
+        episode_metrics = []
         
         for episode in range(config['EPISODES']):
             state = self.game_env.reset()
@@ -557,48 +575,43 @@ class MLFeedbackLoop:
             
             while True:
                 state_tensor = torch.tensor(state, dtype=torch.float)
-                epsilon = max(0.01, 1 - episode/(config['EPISODES']*0.8))
+                epsilon = max(0.01, 1 - episode / (config['EPISODES'] * 0.8))
                 
                 if random.random() < epsilon:
                     action = random.randint(0, 2)
                 else:
                     action = torch.argmax(model(state_tensor)).item()
                 
-                # Environment step
                 final_move = [0, 0, 0]
                 final_move[action] = 1
                 reward, done, _ = self.game_env.step(final_move)
                 next_state = self.game_env.get_state()
                 
-                # Store experience and update tracker
                 memory.append((state, action, reward, next_state, done))
                 self.state_tracker.update(self.game_env, action, reward, done)
                 
-                # Train batch
                 if len(memory) > config['BATCH_SIZE']:
                     batch = random.sample(memory, config['BATCH_SIZE'])
-                    states, actions, rewards, next_states, dones = zip(*batch)
-                    loss = trainer.train_step(states, actions, rewards, next_states, dones)
+                    states_batch, actions_batch, rewards_batch, next_states_batch, dones_batch = zip(*batch)
+                    loss = trainer.train_step(states_batch, actions_batch, rewards_batch, next_states_batch, dones_batch)
                     episode_losses.append(loss)
                 
                 if done:
-                    # Update metrics
-                    metrics = self.state_tracker.get_metrics()
-                    metrics.update({
+                    game_metrics = self.state_tracker.get_metrics()
+                    training_metrics = {
                         'episode': episode,
                         'avg_loss': np.mean(episode_losses) if episode_losses else 0,
                         'epsilon': epsilon,
                         'memory_size': len(memory)
-                    })
+                    }
+                    metrics = {**game_metrics, **training_metrics}
                     self.metrics_history.append(metrics)
+                    self.metrics_tracker.update_episode(metrics)
                     
-                    # Periodic logging and visualization
                     if episode % 100 == 0:
                         self.logger.info(
-                            f"Episode {episode} | "
-                            f"Score: {metrics['avg_score']:.2f} | "
-                            f"Loss: {metrics['avg_loss']:.4f} | "
-                            f"Epsilon: {epsilon:.2f}"
+                            f"Episode {episode} | Score: {metrics['avg_score']:.2f} | "
+                            f"Loss: {metrics['avg_loss']:.4f} | Epsilon: {epsilon:.2f}"
                         )
                         self.visualizer.plot_training_progress(self.metrics_history, config)
                     break
@@ -625,11 +638,9 @@ class MLFeedbackLoop:
                 final_move = [0, 0, 0]
                 final_move[action] = 1
                 reward, done, score = self.game_env.step(final_move)
-                
                 self.state_tracker.update(self.game_env, action, reward, done)
                 if done:
                     scores.append(score)
-                
                 state = self.game_env.get_state()
         
         model.train()  # Reset to training mode
@@ -664,7 +675,7 @@ class MLFeedbackLoop:
                 }
                 cycle_results.append(result)
                 
-                # Update best model
+                # Update best model if improved
                 if eval_metrics['avg_score'] > (self.best_model['score'] if self.best_model else -np.inf):
                     self.best_model = {
                         'model': model.state_dict(),
@@ -673,7 +684,7 @@ class MLFeedbackLoop:
                     }
                     torch.save(model.state_dict(), self.log_dir / 'best_model.pth')
                 
-                # Generate visualizations
+                # Generate heatmap visualization
                 self.visualizer.create_heatmap(
                     self.state_tracker.position_history,
                     f"Position Heatmap - {config['LR']}_{config['GAMMA']}"
@@ -683,42 +694,84 @@ class MLFeedbackLoop:
                 self.logger.error(f"Training failed for config {config}: {str(e)}")
                 continue
         
-        # Update parameter ranges based on results
         if cycle_results:
             self.tuner.update_ranges(cycle_results)
-        
         self.results.extend(cycle_results)
         return cycle_results
-    def __init__(self, game_env, model_class, log_dir='logs'):
-        self.game_env = game_env
-        self.model_class = model_class
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(exist_ok=True)
+    
+    # End of MLFeedbackLoop
+
+#############################
+# Main Entry Point
+#############################
+if __name__ == '__main__':
+    # Assume that you have defined or imported your game environment and model
+    # For example:
+    # from snake_game import SnakeGameAI
+    # from snake_ai import SnakeAI
+    #
+    # Here we use placeholders; replace them with your actual implementations.
+    
+    # Placeholder game environment (must implement reset(), step(), get_state(), _is_collision(), etc.)
+    class SnakeGameAI:
+        def __init__(self, width=600, height=400, block_size=20):
+            self.width = width
+            self.height = height
+            self.block_size = block_size
+            # Dummy attributes for food and trap
+            self.food = {'position': [100, 100]}
+            self.trap = None
+            self.snake = [[width // 2, height // 2]]
+            self.score = 0
         
-        # Initialize components with game dimensions
-        grid_width = game_env.width
-        grid_height = game_env.height
-        block_size = game_env.block_size
+        def reset(self):
+            self.snake = [[self.width // 2, self.height // 2]]
+            self.score = 0
+            # Reset food to a new position for testing
+            self.food = {'position': [random.randrange(0, self.width, self.block_size),
+                                       random.randrange(0, self.height, self.block_size)]}
+            return self.get_state()
         
-        self.state_tracker = GameStateTracker(grid_width, grid_height, block_size)
-        self.visualizer = Visualizer(log_dir, 
-                                   self.state_tracker.grid_cols, 
-                                   self.state_tracker.grid_rows)
-        self.tuner = HyperparameterTuner({
-            'MAX_MEMORY': 100_000,
-            'BATCH_SIZE': 1000,
-            'LR': 0.001,
-            'GAMMA': 0.9,
-            'HIDDEN_SIZE': 256,
-            'EPISODES': 1000
-        })
+        def get_state(self):
+            # Return a dummy state vector; adjust as needed
+            # For instance, if your state is 11-dimensional, return an array of length 11.
+            return np.random.randint(0, 2, size=(11,))
         
-        self.results = []
-        self.best_model = None
-        self.metrics_history = []
+        def _is_collision(self, point):
+            # Simple boundary collision for testing
+            if point[0] < 0 or point[0] >= self.width or point[1] < 0 or point[1] >= self.height:
+                return True
+            return False
         
-        # Configure logging
-        logging.basicConfig(
-            filename=self.log_dir / f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
+        def step(self, final_move):
+            # Dummy step function: randomly end game and update score
+            # In a real game, update snake position, check collisions, update score, etc.
+            self.score += 1
+            done = random.random() < 0.05  # 5% chance of game over
+            return 10, done, self.score  # reward, done, score
+    
+    # Placeholder model (must implement input_size, hidden_size, output_size, and forward())
+    class SnakeAI(nn.Module):
+        def __init__(self, input_size, hidden_size, output_size):
+            super(SnakeAI, self).__init__()
+            self.input_size = input_size
+            self.hidden_size = hidden_size
+            self.output_size = output_size
+            self.linear1 = nn.Linear(input_size, hidden_size)
+            self.linear2 = nn.Linear(hidden_size, hidden_size)
+            self.linear3 = nn.Linear(hidden_size, output_size)
+        
+        def forward(self, x):
+            x = torch.relu(self.linear1(x))
+            x = torch.relu(self.linear2(x))
+            x = self.linear3(x)
+            return x
+    
+    # Instantiate the game environment and feedback loop system
+    game_env = SnakeGameAI()
+    feedback_loop = MLFeedbackLoop(game_env, SnakeAI, log_dir='logs')
+    
+    # Run a single optimization cycle for testing
+    results = feedback_loop.run_cycle()
+    print("Optimization cycle results:")
+    print(results)
